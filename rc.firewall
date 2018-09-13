@@ -1,0 +1,338 @@
+#!/bin/sh
+
+#################################################################################
+#										#
+# rc.firewall - Initial SIMPLE IP Firewall script for Linux 2.4.x and iptables  #
+#										#
+# 10/01/2003  Created by Dijiang Huang UMKC Networking Lab			#
+#										#
+#################################################################################
+#
+#
+# Configuration options, these will speed you up getting this script to
+# work with your own setup.
+#
+# your LAN's IP range and localhost IP. /24 means to only use the first 24 
+# bits of the 32 bit IP adress. the same as netmask 255.255.255.0
+#
+#
+###########################################################################
+#
+# 1. Configuration options.
+#
+#
+# 1.1 Internet Configuration.
+#
+#
+# Static IP address of public network
+#
+
+####
+####ERIC WILLIAMS: This is the variables for the external network
+####
+
+LAN_0_IP="192.168.0.1"
+LAN_0_IP_RANGE="192.168.0.1/24"
+LAN_0_BCAST_ADRESS="192.168.0.1"
+LAN_0_IFACE="eth0"
+
+#
+# 1.2 Local area network configuration.
+#
+#
+
+#
+# Internal firewall ip address
+# domain: ialab.asu.edu
+#
+
+####
+####ERIC WILLIAMS: this is for the client machine
+####
+
+LAN_1_IP="10.0.0.6"
+LAN_1_IP_RANGE="10.0.0.0/8"
+LAN_1_BCAST_ADRESS="10.255.255.255"
+LAN_1_IFACE="eth1"
+
+####
+####ERIC WILLIAMS: this is for the server machine
+####
+
+LAN_2_IP="172.16.0.3"
+LAN_2_IP_RANGE="172.16.0.0/12"
+LAN_2_BCAST_ADRESS="172.31.255.255"
+LAN_2_IFACE="eth2"
+
+#
+# IP aliases
+#
+LO_IFACE="lo"
+LO_IP="127.0.0.1"
+
+#
+# 1.3 IPTables Configuration.
+#
+
+IPTABLES="/sbin/iptables"
+
+###########################################################################
+#
+# 2. Module loading.
+#
+
+#
+# Needed to initially load modules
+#
+/sbin/depmod -a	 
+
+#
+# flush iptables
+#
+/sbin/iptables -F 
+/sbin/iptables -F -t nat
+
+# 2.1 Required modules
+#
+
+/sbin/modprobe ip_tables
+/sbin/modprobe ip_conntrack
+/sbin/modprobe iptable_filter
+/sbin/modprobe iptable_mangle
+/sbin/modprobe iptable_nat
+/sbin/modprobe ipt_LOG
+/sbin/modprobe ipt_limit
+/sbin/modprobe ipt_state
+/sbin/modprobe ipt_MASQUERADE
+
+###########################################################################
+#
+# 3. /proc set up.
+#
+
+#
+# 3.1 Required proc configuration
+#
+
+#
+# Enable ip_forward, this is critical since it is turned off as defaul in 
+# Linux.
+#
+echo "1" > /proc/sys/net/ipv4/ip_forward
+
+###########################################################################
+# 4.1 Filter table
+#
+
+#
+# 4.1.1 Set policies
+#
+
+#
+# Set default policies for the INPUT, FORWARD and OUTPUT chains
+#
+
+$IPTABLES -P INPUT DROP
+$IPTABLES -P OUTPUT DROP
+$IPTABLES -P FORWARD DROP
+
+#
+# 4.1.2 Create userspecified chains
+#
+
+#
+# Create chain for bad tcp packets
+#
+
+$IPTABLES -N bad_tcp_packets
+
+#
+# Create separate chains for ICMP, TCP and UDP to traverse
+#
+
+$IPTABLES -N allowed
+$IPTABLES -N tcp_packets
+$IPTABLES -N udp_packets
+$IPTABLES -N icmp_packets
+
+#
+# 4.1.3 Create content in userspecified chains
+#
+
+#
+# bad_tcp_packets chain
+#
+
+$IPTABLES -A bad_tcp_packets -p tcp --tcp-flags SYN,ACK SYN,ACK -m state --state NEW -j REJECT --reject-with tcp-reset 
+$IPTABLES -A bad_tcp_packets -p tcp ! --syn -m state --state NEW -j LOG --log-prefix "New not syn:"
+$IPTABLES -A bad_tcp_packets -p tcp ! --syn -m state --state NEW -j DROP
+
+#
+# allowed chain
+#
+
+$IPTABLES -A allowed -p TCP --syn -j ACCEPT
+$IPTABLES -A allowed -p TCP -m state --state ESTABLISHED,RELATED -j ACCEPT
+$IPTABLES -A allowed -p TCP -j DROP
+
+#
+# TCP rules
+#
+
+$IPTABLES -A tcp_packets -p TCP -s 0/0 --dport 80 -j allowed
+
+#
+# UDP ports
+#
+
+$IPTABLES -A udp_packets -p UDP -s 0/0 --destination-port 2074 -j ACCEPT
+$IPTABLES -A udp_packets -p UDP -s 0/0 --destination-port 4000 -j ACCEPT
+
+#
+# ICMP rules
+#
+
+$IPTABLES -A icmp_packets -p ICMP -s 0/0 --icmp-type 8 -j ACCEPT
+$IPTABLES -A icmp_packets -p ICMP -s 0/0 --icmp-type 11 -j ACCEPT
+
+#
+# 4.1.4 INPUT chain
+#
+
+#
+# Bad TCP packets we don't want.
+#
+
+$IPTABLES -A INPUT -p tcp -j bad_tcp_packets
+
+
+#
+# Special rule for DHCP requests from LAN, which are not caught properly
+# otherwise.
+#
+
+$IPTABLES -A INPUT -p UDP -i $LAN_1_IFACE --dport 67 --sport 68 -j ACCEPT
+
+#
+# Rules for incoming packets from the internet.
+#
+
+$IPTABLES -A INPUT -p ALL -d $LAN_0_IP -m state --state ESTABLISHED,RELATED \
+-j ACCEPT
+$IPTABLES -A INPUT -p TCP -i $LAN_0_IFACE -j tcp_packets
+$IPTABLES -A INPUT -p UDP -i $LAN_0_IFACE -j udp_packets
+$IPTABLES -A INPUT -p ICMP -i $LAN_0_IFACE -j icmp_packets
+
+#
+# If you have a Microsoft Network on the outside of your firewall, you may 
+# also get flooded by Multicasts. We drop them so we do not get flooded by 
+# logs
+#
+
+#$IPTABLES -A INPUT -i $LAN_0_IFACE -d 224.0.0.0/8 -j DROP
+
+#
+# Log weird packets that don't match the above.
+#
+
+$IPTABLES -A INPUT -m limit --limit 3/minute --limit-burst 3 -j LOG \
+--log-level DEBUG --log-prefix "IPT INPUT packet died: "
+
+#
+# 4.1.5 FORWARD chain
+#
+
+#
+# Bad TCP packets we don't want
+#
+
+$IPTABLES -A FORWARD -p tcp -j bad_tcp_packets
+
+#
+# Accept the packets we actually want to forward
+#
+
+$IPTABLES -A FORWARD -p tcp -j tcp_packets
+$IPTABLES -A FORWARD -i $LAN_1_IFACE -j ACCEPT
+$IPTABLES -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+####
+####ERIC WILLIAMS: this is the forwarding through the GW for the server and client
+####
+
+$IPTABLES -A FORWARD -p icmp --icmp-type 8 -i $LAN_2_IFACE -o $LAN_1_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -p icmp --icmp-type 0 -i $LAN_1_IFACE -o $LAN_2_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -p icmp --icmp-type 8 -i $LAN_1_IFACE -o $LAN_2_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -p icmp --icmp-type 0 -i $LAN_2_IFACE -o $LAN_1_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -p icmp --icmp-type 8 -i $LAN_2_IFACE -o $LAN_0_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -p icmp --icmp-type 0 -i $LAN_0_IFACE -o $LAN_2_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -p icmp --icmp-type 8 -i $LAN_1_IFACE -o $LAN_0_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -p icmp --icmp-type 0 -i $LAN_0_IFACE -o $LAN_0_IFACE \
+-j ACCEPT
+$IPTABLES -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+$IPTABLES -A FORWARD -i eth1 -o eth0 -j ACCEPT
+
+$IPTABLES -A FORWARD -i eth0 -o eth2 -m state --state RELATED,ESTABLISHED -j ACCEPT
+$IPTABLES -A FORWARD -i eth2 -o eth 0 -j ACCEPT
+
+
+#
+# Log weird packets that don't match the above.
+#
+
+$IPTABLES -A FORWARD -m limit --limit 3/minute --limit-burst 3 -j LOG \
+--log-level DEBUG --log-prefix "IPT FORWARD packet died: "
+
+
+#
+# 4.1.6 OUTPUT chain
+#
+
+#
+# Bad TCP packets we don't want.
+#
+
+$IPTABLES -A OUTPUT -p tcp -j bad_tcp_packets
+
+#
+# Special OUTPUT rules to decide which IP's to allow.
+#
+
+$IPTABLES -A OUTPUT -p ALL -s $LO_IP -j ACCEPT
+$IPTABLES -A OUTPUT -p ALL -s $LAN_1_IP -j ACCEPT
+$IPTABLES -A OUTPUT -p ALL -s $LAN_0_IP -j ACCEPT
+
+#
+# Log weird packets that don't match the above.
+#
+
+$IPTABLES -A OUTPUT -m limit --limit 3/minute --limit-burst 3 -j LOG \
+--log-level DEBUG --log-prefix "IPT OUTPUT packet died: "
+
+
+##########################
+# 5. NAT setup
+#
+
+#
+# 5.1  PREROUTING chain.
+#
+
+# NAT SETUP
+# 5.2 POSTROUTING chain.
+#
+# Allow private network 10.1.0.0/16 target outside of the public network
+#
+
+####
+####ERIC WILLIAMS: this implements the masquerading for NAT
+####
+
+$IPTABLES -t nat -A POSTROUTING -o eth0 -j MASQUERADE
